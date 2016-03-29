@@ -1,4 +1,4 @@
-这是我从2015年12月BVLC/caffe fork 过来的。根据google的Parameter server的原理并参考sailorsb/caffe-parallel 使用mpi实现的一个多机多卡版本。
+这是我从2015年12月BVLC/caffe fork 过来的。根据Parameter server的原理并参考sailorsb/caffe-parallel 使用mpi实现的一个多机多卡版本。
 
 具体改动：
 solver.cpp 中加入mpi相关的东西
