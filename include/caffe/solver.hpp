@@ -6,11 +6,7 @@
 
 #include "caffe/net.hpp"
 #include "caffe/solver_factory.hpp"
-#include "caffe/util/mpi.hpp"
 
-#define TAG_DIFF_0 0
-#define TAG_DIFF 1
-#define TAG_DATA 2
 namespace caffe {
 
 /**
@@ -70,7 +66,7 @@ class Solver {
   // function that produces a SolverState protocol buffer that needs to be
   // written to disk together with the learned net.
   void Snapshot();
-  virtual ~Solver();
+  virtual ~Solver() {}
   inline const SolverParameter& param() const { return param_; }
   inline shared_ptr<Net<Dtype> > net() { return net_; }
   inline const vector<shared_ptr<Net<Dtype> > >& test_nets() {
@@ -111,6 +107,11 @@ class Solver {
   virtual void RestoreSolverStateFromHDF5(const string& state_file) = 0;
   virtual void RestoreSolverStateFromBinaryProto(const string& state_file) = 0;
   void DisplayOutputBlobs(const int net_id);
+  void UpdateSmoothedLoss(Dtype loss, int start_iter, int average_loss);
+#ifdef USE_MPI
+  void SyncGradient();
+  void SyncData();
+#endif
 
   SolverParameter param_;
   int iter_;
@@ -118,6 +119,8 @@ class Solver {
   shared_ptr<Net<Dtype> > net_;
   vector<shared_ptr<Net<Dtype> > > test_nets_;
   vector<Callback*> callbacks_;
+  vector<Dtype> losses_;
+  Dtype smoothed_loss_;
 
   // The root solver that holds root nets (actually containing shared layers)
   // in data parallelism
@@ -129,13 +132,7 @@ class Solver {
 
   // True iff a request to stop early was received.
   bool requested_early_exit_;
-  
-  //MPI rank and DataType 
-  int mpi_source;//where data recv from
-  int rank;//slef number
-  int mpi_size;
-  MPI_Datatype mpiRootData;//root 
-  MPI_Datatype mpiMyData;//learnable_params_
+
   DISABLE_COPY_AND_ASSIGN(Solver);
 };
 

@@ -4,33 +4,16 @@
 #include <vector>
 
 #include "caffe/solver.hpp"
+#include "caffe/util/format.hpp"
 #include "caffe/util/hdf5.hpp"
 #include "caffe/util/io.hpp"
 #include "caffe/util/upgrade_proto.hpp"
+#ifdef USE_MPI
+#include "caffe/util/mpi_functions.hpp"
+#include "caffe/util/mpijob.hpp"
+#endif
 
-
-void* tempDiff = NULL;//store mpimessge
-//void* flagUP = NULL;
-int upSum = 0;
 namespace caffe {
-
-template <typename Dtype>
-Solver<Dtype>::~Solver(){
- // delete [] flagCC;
-  if(this->rank==0){
-    for(int i=0;i<upSum;++i){
-      delete[] ((Dtype***)tempDiff)[i][0];
-      delete[] ((Dtype***)tempDiff)[i];
-    }
-    delete[] (Dtype***)tempDiff;
-    if(this->mpiRootData != MPI_DATATYPE_NULL)
-      MPI_Type_free(&this->mpiRootData);
-  }
-  
-  if(this->mpiMyData!= MPI_DATATYPE_NULL)
-    MPI_Type_free(&this->mpiMyData);
-  
-}
 
 template<typename Dtype>
 void Solver<Dtype>::SetActionFunction(ActionCallback func) {
@@ -82,12 +65,6 @@ void Solver<Dtype>::Init(const SolverParameter& param) {
   }
   iter_ = 0;
   current_step_ = 0;
-
-  MPI_Comm_rank (MPI_COMM_WORLD, &rank);
-  MPI_Comm_size (MPI_COMM_WORLD, &mpi_size);
-  mpi_source = 0;// 0 for init
-  mpiMyData = MPI_DATATYPE_NULL;
-  mpiRootData = MPI_DATATYPE_NULL;
 }
 
 template <typename Dtype>
@@ -217,17 +194,51 @@ void Solver<Dtype>::InitTestNets() {
   }
 }
 
+#ifdef USE_MPI
+template <typename Dtype>
+void Solver<Dtype>::SyncData(){
+  const vector<shared_ptr<Blob<Dtype> > >& net_params = net()->params();
+  for(int i = 0; i<net_params.size();i++){
+    Dtype* data = net_params[i]->mutable_cpu_data();
+    caffe_ibcast(data, net_params[i]->count());
+  }
+  mpi_force_synchronize();
+}
+
+template <typename Dtype>
+void Solver<Dtype>::SyncGradient(){
+  mpi_force_synchronize();
+  const vector<shared_ptr<Blob<Dtype> > >& net_params = net()->params();
+    for (int i = 0; i < net_->params().size(); ++i) {
+      shared_ptr<Blob<Dtype> > blob = net_->params()[i];
+      switch (Caffe::mode()) {
+      case Caffe::CPU:
+        caffe_scal(net_params[i]->count(),
+                     Dtype(1.)/Dtype(Caffe::MPI_all_rank()),
+                     net_params[i]->mutable_cpu_diff());
+        break;
+      case Caffe::GPU:
+#ifndef CPU_ONLY
+        caffe_gpu_scal(net_params[i]->count(),
+                     Dtype(1.)/Dtype(Caffe::MPI_all_rank()),
+                     net_params[i]->mutable_gpu_diff());
+#else
+        NO_GPU;
+#endif
+        break;
+      }
+    }
+
+}
+#endif
+
 template <typename Dtype>
 void Solver<Dtype>::Step(int iters) {
-  vector<Blob<Dtype>*> bottom_vec;
-  //get rank number and size 
-  //rank
-  //size
   const int start_iter = iter_;
   const int stop_iter = iter_ + iters;
   int average_loss = this->param_.average_loss();
-  vector<Dtype> losses;
-  Dtype smoothed_loss = 0;
+  losses_.clear();
+  smoothed_loss_ = 0;
 
   while (iter_ < stop_iter) {
     // zero-init the params
@@ -250,24 +261,23 @@ void Solver<Dtype>::Step(int iters) {
     // accumulate the loss and gradient
     Dtype loss = 0;
     for (int i = 0; i < param_.iter_size(); ++i) {
-      //LOG(INFO) << "i = " << i << " sum  loss is " << loss;
-      loss += net_->ForwardBackward(bottom_vec);
+#ifdef USE_MPI
+      if(i == param_.iter_size() -1)
+        MPIComm::SetReady(true);
+      else
+        MPIComm::SetReady(false);
+#endif        
+      loss += net_->ForwardBackward();
     }
+#ifdef USE_MPI
+    SyncGradient();
+#endif
     loss /= param_.iter_size();
-    //LOG(INFO) << "notice ....iter_ = " << iter_ <<" average loss is " << loss;
     // average the loss across iterations for smoothed reporting
-    if (losses.size() < average_loss) {
-      losses.push_back(loss);
-      int size = losses.size();
-      smoothed_loss = (smoothed_loss * (size - 1) + loss) / size;
-    } else {
-      int idx = (iter_ - start_iter) % average_loss;
-      smoothed_loss += (loss - losses[idx]) / average_loss;
-      losses[idx] = loss;
-    }
+    UpdateSmoothedLoss(loss, start_iter, average_loss);
     if (display) {
       LOG_IF(INFO, Caffe::root_solver()) << "Iteration " << iter_
-          << ", loss = " << smoothed_loss;
+          << ", loss = " << smoothed_loss_;
       const vector<Blob<Dtype>*>& result = net_->output_blobs();
       int score_index = 0;
       for (int j = 0; j < result.size(); ++j) {
@@ -291,67 +301,8 @@ void Solver<Dtype>::Step(int iters) {
     for (int i = 0; i < callbacks_.size(); ++i) {
       callbacks_[i]->on_gradients_ready();
     }
+    ApplyUpdate();
 
-    
-    if(rank ==0){
-      //LOG(INFO) << "Recving Diff...... ";
-      const vector<Blob<Dtype>*> &learn_params_ = this->net_->learnable_params();
-      for (int i = 1; i < mpi_size; i++){
-        Dtype **temp = ((Dtype***)tempDiff)[i-1];
-        MPI_Status status;
-        status.MPI_ERROR=0;
-        int source = 0;
-        for(int j = 0; j < learn_params_.size(); j++){ 
-          if( 0 == j) {
-            caffe_mpi_recv<Dtype>(temp[j],learn_params_[j]->count(),MPI_ANY_SOURCE,TAG_DIFF_0,MPI_COMM_WORLD,&status);
-            source = status.MPI_SOURCE;
-          }else{
-            caffe_mpi_recv<Dtype>(temp[j],learn_params_[j]->count(),source,TAG_DIFF,MPI_COMM_WORLD,&status);
-          }
-        }
-       // LOG(INFO) << "Recved Diff form " << status.MPI_SOURCE ;
-      } 
-      //sum all learnable_params,and updata self
-      for(int i = 0; i <this->net_->learnable_params().size(); i++){
-        for(int j = 0; j < mpi_size-1 ; j++ ){
-         Dtype **diff = ((Dtype***)tempDiff)[j];
-         caffe_axpy(learn_params_[i]->count(),(Dtype)1,&diff[i][0],
-                      learn_params_[i]->mutable_cpu_diff());//sum all diff
-        }
-        caffe_scal(learn_params_[i]->count(),(Dtype)(1.0/mpi_size),
-                     learn_params_[i]->mutable_cpu_diff());//average = diff/size
-      }
-      ApplyUpdate();
-      for(int i = 1; i < mpi_size; i++){
-        for(int j = 0; j < learn_params_.size(); j++){
-          caffe_mpi_send<Dtype>(learn_params_[j]->mutable_cpu_data(),learn_params_[j]->count(),
-                                 i,TAG_DATA,MPI_COMM_WORLD);
-        }
-       // LOG(INFO) << "Sended Data to " << i;
-      }
-    }else{
-      MPI_Status status;
-      status.MPI_ERROR = 0;
-      //LOG(INFO) << "Sending Diff......";
-      
-      const vector<Blob<Dtype>*> &learn_params_ = this->net_->learnable_params();
-      for(int i = 0; i < learn_params_.size(); i++){
-      if( i == 0) 
-        caffe_mpi_send<Dtype>(learn_params_[i]->mutable_cpu_diff(),learn_params_[i]->count(),0,TAG_DIFF_0,MPI_COMM_WORLD);
-      else
-        caffe_mpi_send<Dtype>(learn_params_[i]->mutable_cpu_diff(),learn_params_[i]->count(),0,TAG_DIFF,MPI_COMM_WORLD);
-      }
-      // recv from rank 0 and replace self params
-      for(int i = 0; i < learn_params_.size(); i++){
-        caffe_mpi_recv<Dtype>(learn_params_[i]->mutable_cpu_data(),learn_params_[i]->count(),0,TAG_DATA,MPI_COMM_WORLD,&status);
-      }
-      //LOG(INFO) << "Recved Data form root ";
-      //replace slef this->net->learnable_params();
-    } 
-     
-    
-    //ApplyUpdate();
-	
     // Increment the internal iter_ counter -- its value should always indicate
     // the number of times the weights have been updated.
     ++iter_;
@@ -363,7 +314,16 @@ void Solver<Dtype>::Step(int iters) {
          && iter_ % param_.snapshot() == 0
          && Caffe::root_solver()) ||
          (request == SolverAction::SNAPSHOT)) {
+#ifdef USE_MPI
+      if(Caffe::MPI_my_rank()==0)
+#endif
       Snapshot();
+#ifdef USE_MPI
+      //Stop the world to wait for the master process to finish snapshot
+      //TODO: Send this to queue in blocking mode
+      MPIComm::Syncrhonize();
+      MPI_Barrier(MPI_COMM_WORLD);
+#endif
     }
     if (SolverAction::STOP == request) {
       requested_early_exit_ = true;
@@ -386,80 +346,26 @@ void Solver<Dtype>::Solve(const char* resume_file) {
     LOG(INFO) << "Restoring previous solver status from " << resume_file;
     Restore(resume_file);
   }
- 
-   
-  vector<Blob<Dtype>*> learn_params_=this->net_->learnable_params();
-  if(rank == 0){
-    MPI_Comm_size (MPI_COMM_WORLD, &mpi_size);
-    upSum = mpi_size - 1;
-    //flagUP =new int[upSum];
-    //memset(flagUP,0,sizeof(int)*upSum);
-    tempDiff=new Dtype**[upSum];     
-    //LOG(INFO) << "new tempDiff ok .....";
-    int tNetCount = 0;
-    for(int j = 0; j < learn_params_.size(); ++j){
-      tNetCount += learn_params_[j]->count();
-    }  
-    //LOG(INFO) << "ok no1 ......and upSum = " << upSum;
-    for(int i = 0; i < upSum; i++){
-      
-      ((Dtype***)tempDiff)[i]=new Dtype*[learn_params_.size()];
-      ((Dtype***)tempDiff)[i][0] = new Dtype[tNetCount];
-      for(int j = 1; j < learn_params_.size(); j++){
-        ((Dtype***)tempDiff)[i][j]= ((Dtype***)tempDiff)[i][j-1]+learn_params_[j-1]->count();  
-      }
-    }
-    //LOG(INFO) << "starting to new datatype...";
-    MPI_Datatype *netDataType=new MPI_Datatype[learn_params_.size()];
-    int *blocklen = new int[learn_params_.size()];
-    MPI_Aint *displacement = new MPI_Aint[learn_params_.size()];
-    Dtype **diff = ((Dtype***)tempDiff)[0];
-    for (int param_id = 0; param_id < learn_params_.size(); ++param_id) {
-      blocklen[param_id] = learn_params_[param_id]->count();
-      if(typeid(Dtype) == typeid(float))
-        netDataType[param_id] = MPI_FLOAT;
-      else if(typeid(Dtype)==typeid(double))
-        netDataType[param_id] = MPI_DOUBLE;
-      else
-        LOG(FATAL)<<"This datetype is not support!"<<typeid(Dtype).name();
-      displacement[param_id] = (char*) diff[param_id]- (char*) diff[0];
-    }
-    MPI_Type_struct(this->net_->learnable_params().size(),blocklen,displacement,netDataType,&mpiRootData);
-    MPI_Type_commit(&mpiRootData);
-    delete[] netDataType;
-    delete[] blocklen;
-    delete[] displacement;
-    //LOG(INFO) << "mpiRootData submit ok ......" ;
-  }
-  //else{
-    MPI_Datatype *netDataType=new MPI_Datatype[learn_params_.size()];
-    int *blocklen = new int[learn_params_.size()];
-    MPI_Aint *displacement = new MPI_Aint[learn_params_.size()];
-    for (int param_id = 0; param_id < learn_params_.size(); ++param_id) {
-      blocklen[param_id] = learn_params_[param_id]->count();
-      if(typeid(Dtype) == typeid(float))
-        netDataType[param_id] = MPI_FLOAT;
-      else if(typeid(Dtype) == typeid(double))
-        netDataType[param_id] = MPI_DOUBLE;
-      else
-        LOG(FATAL)<<"This datetype is not support!"<<typeid(Dtype).name();
-      displacement[param_id] = (char*)learn_params_[param_id] - (char*)learn_params_[0];
-    }
-    MPI_Type_struct(this->net_->learnable_params().size(),blocklen,displacement,netDataType,&mpiMyData);
-    MPI_Type_commit(&mpiMyData);
-    delete[] netDataType;
-    delete[] blocklen;
-    delete[] displacement;
-  
-  //}
+
   // For a network that is trained by the solver, no bottom or top vecs
   // should be given, and we will just provide dummy vecs.
+  int start_iter = iter_;
+  SyncData();
   Step(param_.max_iter() - iter_);
   // If we haven't already, save a snapshot after optimization, unless
   // overridden by setting snapshot_after_train := false
   if (param_.snapshot_after_train()
       && (!param_.snapshot() || iter_ % param_.snapshot() != 0)) {
+#ifdef USE_MPI
+    if(0 == Caffe::MPI_my_rank())
+#endif
     Snapshot();
+#ifdef USE_MPI
+      //Stop the world to wait for the master process to finish snapshot
+      //TODO: Send this to queue in blocking mode
+      MPIComm::Syncrhonize();
+      MPI_Barrier(MPI_COMM_WORLD);
+#endif
   }
   if (requested_early_exit_) {
     LOG(INFO) << "Optimization stopped early.";
@@ -472,9 +378,13 @@ void Solver<Dtype>::Solve(const char* resume_file) {
   // updated the parameters "max_iter" times -- this final pass is only done to
   // display the loss, which is computed in the forward pass.
   if (param_.display() && iter_ % param_.display() == 0) {
+    int average_loss = this->param_.average_loss();
     Dtype loss;
-    net_->ForwardPrefilled(&loss);
-    LOG(INFO) << "Iteration " << iter_ << ", loss = " << loss;
+    net_->Forward(&loss);
+
+    UpdateSmoothedLoss(loss, start_iter, average_loss);
+
+    LOG(INFO) << "Iteration " << iter_ << ", loss = " << smoothed_loss_;
   }
   if (param_.test_interval() && iter_ % param_.test_interval() == 0) {
     TestAll();
@@ -500,7 +410,6 @@ void Solver<Dtype>::Test(const int test_net_id) {
       ShareTrainedLayersWith(net_.get());
   vector<Dtype> test_score;
   vector<int> test_score_output_id;
-  vector<Blob<Dtype>*> bottom_vec;
   const shared_ptr<Net<Dtype> >& test_net = test_nets_[test_net_id];
   Dtype loss = 0;
   for (int i = 0; i < param_.test_iter(test_net_id); ++i) {
@@ -521,7 +430,7 @@ void Solver<Dtype>::Test(const int test_net_id) {
 
     Dtype iter_loss;
     const vector<Blob<Dtype>*>& result =
-        test_net->Forward(bottom_vec, &iter_loss);
+        test_net->Forward(&iter_loss);
     if (param_.test_compute_loss()) {
       loss += iter_loss;
     }
@@ -605,11 +514,8 @@ void Solver<Dtype>::CheckSnapshotWritePermissions() {
 
 template <typename Dtype>
 string Solver<Dtype>::SnapshotFilename(const string extension) {
-  string filename(param_.snapshot_prefix());
-  const int kBufferSize = 20;
-  char iter_str_buffer[kBufferSize];
-  snprintf(iter_str_buffer, kBufferSize, "_iter_%d", iter_);
-  return filename + iter_str_buffer + extension;
+  return param_.snapshot_prefix() + "_iter_" + caffe::format_int(iter_)
+    + extension;
 }
 
 template <typename Dtype>
@@ -639,6 +545,20 @@ void Solver<Dtype>::Restore(const char* state_file) {
     RestoreSolverStateFromHDF5(state_filename);
   } else {
     RestoreSolverStateFromBinaryProto(state_filename);
+  }
+}
+
+template <typename Dtype>
+void Solver<Dtype>::UpdateSmoothedLoss(Dtype loss, int start_iter,
+    int average_loss) {
+  if (losses_.size() < average_loss) {
+    losses_.push_back(loss);
+    int size = losses_.size();
+    smoothed_loss_ = (smoothed_loss_ * (size - 1) + loss) / size;
+  } else {
+    int idx = (iter_ - start_iter) % average_loss;
+    smoothed_loss_ += (loss - losses_[idx]) / average_loss;
+    losses_[idx] = loss;
   }
 }
 

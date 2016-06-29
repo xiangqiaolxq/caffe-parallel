@@ -18,6 +18,14 @@
 
 #include "caffe/util/device_alternate.hpp"
 
+#ifdef USE_MPI
+#include <mpi.h>
+#endif
+
+// Convert macro to string
+#define STRINGIFY(m) #m
+#define AS_STRING(m) STRINGIFY(m)
+
 // gflags 2.1 issue: namespace google was changed to gflags without warning.
 // Luckily we will be able to use GFLAGS_GFLAGS_H_ to detect if it is version
 // 2.1. If yes, we will add a temporary solution to redirect the namespace.
@@ -92,6 +100,7 @@ using std::vector;
 // A global initialization function that you should call in your main function.
 // Currently it initializes google flags and google logging.
 void GlobalInit(int* pargc, char*** pargv);
+void GlobalFinalize();
 
 // A singleton class to hold common caffe stuff, such as the handler that
 // caffe is going to use for cublas, curand, etc.
@@ -149,11 +158,25 @@ class Caffe {
   static void SetDevice(const int device_id);
   // Prints the current GPU status.
   static void DeviceQuery();
+  // Check if specified device is available
+  static bool CheckDevice(const int device_id);
+  // Search from start_id to the highest possible device ordinal,
+  // return the ordinal of the first available device.
+  static int FindDevice(const int start_id = 0);
   // Parallel training info
   inline static int solver_count() { return Get().solver_count_; }
   inline static void set_solver_count(int val) { Get().solver_count_ = val; }
   inline static bool root_solver() { return Get().root_solver_; }
   inline static void set_root_solver(bool val) { Get().root_solver_ = val; }
+  inline static int device_id() { return Get().device_id_; }
+#ifdef USE_MPI
+  inline static int MPI_my_rank(){return Get().mpi_my_rank_;}
+  inline static int MPI_all_rank(){return Get().mpi_all_rank_;}
+  inline static void MPI_build_rank(){
+    MPI_Comm_rank(MPI_COMM_WORLD, &(Get().mpi_my_rank_));
+    MPI_Comm_size(MPI_COMM_WORLD, &(Get().mpi_all_rank_));
+  }
+#endif
 
  protected:
 #ifndef CPU_ONLY
@@ -166,6 +189,11 @@ class Caffe {
   int solver_count_;
   bool root_solver_;
 
+  int device_id_;
+#ifdef USE_MPI
+  int mpi_my_rank_;
+  int mpi_all_rank_;
+#endif
  private:
   // The private constructor to avoid duplicate instantiation.
   Caffe();

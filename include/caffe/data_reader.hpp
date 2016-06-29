@@ -9,7 +9,6 @@
 #include "caffe/internal_thread.hpp"
 #include "caffe/util/blocking_queue.hpp"
 #include "caffe/util/db.hpp"
-#include "caffe/util/mpi.hpp"
 
 namespace caffe {
 

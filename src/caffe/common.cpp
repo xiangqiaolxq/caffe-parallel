@@ -47,8 +47,24 @@ void GlobalInit(int* pargc, char*** pargv) {
   ::google::InitGoogleLogging(*(pargv)[0]);
   // Provide a backtrace on segfault.
   ::google::InstallFailureSignalHandler();
+
+#ifdef USE_MPI
+  //try start MPI communication system
+  int provided_thread_support;
+  MPI_Init_thread(pargc, pargv, MPI_THREAD_MULTIPLE, &provided_thread_support);
+
+  CHECK_GE(provided_thread_support, MPI_THREAD_SERIALIZED)<<" Cannot activate MPI thread support";
+
+#endif
 }
 
+void GlobalFinalize(){
+  //Add something here
+
+  #ifdef USE_MPI
+  MPI_Finalize();
+  #endif
+}
 #ifdef CPU_ONLY  // CPU-only Caffe.
 
 Caffe::Caffe()
@@ -58,7 +74,6 @@ Caffe::Caffe()
 Caffe::~Caffe() { }
 
 void Caffe::set_random_seed(const unsigned int seed) {
-  LOG(INFO) << "notice .....random_seed will be set " << seed;
   // RNG seed
   Get().random_generator_.reset(new RNG(seed));
 }
@@ -71,6 +86,15 @@ void Caffe::DeviceQuery() {
   NO_GPU;
 }
 
+bool Caffe::CheckDevice(const int device_id) {
+  NO_GPU;
+  return false;
+}
+
+int Caffe::FindDevice(const int start_id) {
+  NO_GPU;
+  return -1;
+}
 
 class Caffe::RNG::Generator {
  public:
@@ -142,6 +166,7 @@ void Caffe::SetDevice(const int device_id) {
   int current_device;
   CUDA_CHECK(cudaGetDevice(&current_device));
   if (current_device == device_id) {
+    Get().device_id_ = device_id;
     return;
   }
   // The call to cudaSetDevice must come before any calls to Get, which
@@ -156,6 +181,7 @@ void Caffe::SetDevice(const int device_id) {
       CURAND_RNG_PSEUDO_DEFAULT));
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(Get().curand_generator_,
       cluster_seedgen()));
+  Get().device_id_ = device_id;
 }
 
 void Caffe::DeviceQuery() {
@@ -193,6 +219,39 @@ void Caffe::DeviceQuery() {
   return;
 }
 
+bool Caffe::CheckDevice(const int device_id) {
+  // This function checks the availability of GPU #device_id.
+  // It attempts to create a context on the device by calling cudaFree(0).
+  // cudaSetDevice() alone is not sufficient to check the availability.
+  // It lazily records device_id, however, does not initialize a
+  // context. So it does not know if the host thread has the permission to use
+  // the device or not.
+  //
+  // In a shared environment where the devices are set to EXCLUSIVE_PROCESS
+  // or EXCLUSIVE_THREAD mode, cudaSetDevice() returns cudaSuccess
+  // even if the device is exclusively occupied by another process or thread.
+  // Cuda operations that initialize the context are needed to check
+  // the permission. cudaFree(0) is one of those with no side effect,
+  // except the context initialization.
+  bool r = ((cudaSuccess == cudaSetDevice(device_id)) &&
+            (cudaSuccess == cudaFree(0)));
+  // reset any error that may have occurred.
+  cudaGetLastError();
+  return r;
+}
+
+int Caffe::FindDevice(const int start_id) {
+  // This function finds the first available device by checking devices with
+  // ordinal from start_id to the highest available value. In the
+  // EXCLUSIVE_PROCESS or EXCLUSIVE_THREAD mode, if it succeeds, it also
+  // claims the device due to the initialization of the context.
+  int count = 0;
+  CUDA_CHECK(cudaGetDeviceCount(&count));
+  for (int i = start_id; i < count; i++) {
+    if (CheckDevice(i)) return i;
+  }
+  return -1;
+}
 
 class Caffe::RNG::Generator {
  public:

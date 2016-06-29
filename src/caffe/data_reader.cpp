@@ -4,8 +4,8 @@
 #include <vector>
 
 #include "caffe/common.hpp"
-#include "caffe/data_layers.hpp"
 #include "caffe/data_reader.hpp"
+#include "caffe/layers/data_layer.hpp"
 #include "caffe/proto/caffe.pb.h"
 
 namespace caffe {
@@ -74,16 +74,6 @@ void DataReader::Body::InternalThreadEntry() {
   shared_ptr<db::DB> db(db::GetDB(param_.data_param().backend()));
   db->Open(param_.data_param().source(), db::READ);
   shared_ptr<db::Cursor> cursor(db->NewCursor());
-  db::Cursor* cursor_tmp = cursor.get();
-  int rank = 0;
-  MPI_Comm_rank (MPI_COMM_WORLD, &rank);
-  //MPI_Comm_size (MPI_COMM_WORLD, &size);
-  for( int i = 0; i < rank; i++){
-    cursor_tmp->Next();
-    if (!cursor_tmp->valid()) {
-      cursor_tmp->SeekToFirst();
-    }
-  }
   vector<shared_ptr<QueuePair> > qps;
   try {
     int solver_count = param_.phase() == TRAIN ? Caffe::solver_count() : 1;
@@ -118,15 +108,11 @@ void DataReader::Body::read_one(db::Cursor* cursor, QueuePair* qp) {
   datum->ParseFromString(cursor->value());
   qp->full_.push(datum);
 
-  int size = 0;
-  MPI_Comm_size (MPI_COMM_WORLD, &size);
   // go to the next iter
-  for(int i = 0; i< size; i++){
-    cursor->Next();
-    if (!cursor->valid()) {
-      DLOG(INFO) << "Restarting data prefetching from start.";
-      cursor->SeekToFirst();
-    }  
+  cursor->Next();
+  if (!cursor->valid()) {
+    DLOG(INFO) << "Restarting data prefetching from start.";
+    cursor->SeekToFirst();
   }
 }
 
