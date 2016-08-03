@@ -98,7 +98,7 @@ void MPIComm::DispatchJob(MPIJob &job) {
 
 void MPIComm::ThreadFunc(int device){
 #ifndef CPU_ONLY
-  LOG(ERROR)<<"device_id is "<<device;
+  //LOG(ERROR)<<"device_id is "<<device;
   CUDA_CHECK(cudaSetDevice(device));
 #endif
   started_.store(true);

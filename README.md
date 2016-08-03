@@ -1,3 +1,11 @@
+#myslef
+
+Using a CPU thread to communication.
+
+Share test phase data blob with train phase blob to save GPU memory.
+
+MultiGPU test when train phase.
+
 # Caffe
 
 [![Build Status](https://travis-ci.org/BVLC/caffe.svg?branch=master)](https://travis-ci.org/BVLC/caffe)

@@ -186,6 +186,7 @@ void Solver<Dtype>::InitTestNets() {
         << "Creating test net (#" << i << ") specified by " << sources[i];
     if (Caffe::root_solver()) {
       test_nets_[i].reset(new Net<Dtype>(net_params[i]));
+      test_nets_[i]->ShareBlobsWith(net_.get());
     } else {
       test_nets_[i].reset(new Net<Dtype>(net_params[i],
           root_solver_->test_nets_[i].get()));
@@ -195,6 +196,30 @@ void Solver<Dtype>::InitTestNets() {
 }
 
 #ifdef USE_MPI
+template <typename Dtype>
+void Solver<Dtype>::SyncOutput(shared_ptr<Net<Dtype> > net){
+  const vector<Blob<Dtype>*>& result = net->output_blobs();
+  for (int j = 0; j < result.size(); ++j) {
+    caffe_iallreduce<Dtype>(result[j]->mutable_cpu_data(),
+                            result[j]->count());
+  }
+  mpi_force_synchronize();
+  for( int j = 0; j < result.size(); ++j){
+    caffe_scal(result[j]->count(),
+                   Dtype(1.)/Dtype(Caffe::MPI_all_rank()),
+                   result[j]->mutable_cpu_data());
+  }
+
+}
+
+template <typename Dtype>
+Dtype Solver<Dtype>::SyncLoss(Dtype loss){
+  Dtype sum_loss;  
+  caffe_iallreduce<Dtype>(&loss, &sum_loss, 1);
+  mpi_force_synchronize();
+  return sum_loss / Caffe::MPI_all_rank();
+}
+
 template <typename Dtype>
 void Solver<Dtype>::SyncData(){
   const vector<shared_ptr<Blob<Dtype> > >& net_params = net()->params();
@@ -219,8 +244,9 @@ void Solver<Dtype>::SyncGradient(){
         break;
       case Caffe::GPU:
 #ifndef CPU_ONLY
+	net_params[i]->mutable_gpu_diff();
         caffe_gpu_scal(net_params[i]->count(),
-                     Dtype(1.)/Dtype(Caffe::MPI_all_rank()),
+                     Dtype(1.0/Caffe::MPI_all_rank()),
                      net_params[i]->mutable_gpu_diff());
 #else
         NO_GPU;
@@ -228,6 +254,18 @@ void Solver<Dtype>::SyncGradient(){
         break;
       }
     }
+//copy BN layer diff to data
+  const vector<shared_ptr<Layer<Dtype> > >& layers = this->net_->layers();
+  for(int i =0;i<layers.size();i++){
+    if(0 == strcmp(layers[i]->type(),"BatchNorm")){
+      caffe_copy(layers[i]->blobs()[2]->count(),
+        layers[i]->blobs()[2]->gpu_diff(),
+        layers[i]->blobs()[2]->mutable_gpu_data());
+      caffe_copy(layers[i]->blobs()[3]->count(),
+        layers[i]->blobs()[3]->gpu_diff(),
+        layers[i]->blobs()[3]->mutable_gpu_data());
+    }
+  }
 
 }
 #endif
@@ -241,6 +279,7 @@ void Solver<Dtype>::Step(int iters) {
   smoothed_loss_ = 0;
 
   while (iter_ < stop_iter) {
+    SyncData();
     // zero-init the params
     net_->ClearParamDiffs();
     if (param_.test_interval() && iter_ % param_.test_interval() == 0
@@ -350,7 +389,6 @@ void Solver<Dtype>::Solve(const char* resume_file) {
   // For a network that is trained by the solver, no bottom or top vecs
   // should be given, and we will just provide dummy vecs.
   int start_iter = iter_;
-  SyncData();
   Step(param_.max_iter() - iter_);
   // If we haven't already, save a snapshot after optimization, unless
   // overridden by setting snapshot_after_train := false
@@ -434,6 +472,10 @@ void Solver<Dtype>::Test(const int test_net_id) {
     if (param_.test_compute_loss()) {
       loss += iter_loss;
     }
+#ifdef USE_MPI
+  SyncOutput(test_net);
+  loss = SyncLoss(loss);
+#endif
     if (i == 0) {
       for (int j = 0; j < result.size(); ++j) {
         const Dtype* result_vec = result[j]->cpu_data();

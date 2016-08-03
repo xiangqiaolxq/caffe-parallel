@@ -588,13 +588,15 @@ void Net<Dtype>::BackwardFromTo(int start, int end) {
       layers_[i]->Backward(
           top_vecs_[i], bottom_need_backward_[i], bottom_vecs_[i]);
       if (debug_info_) { BackwardDebugInfo(i); }
-#ifdef USE_MPI
-      for(int j =0;i<layers_[i]->blobs().size();j++){
-        caffe_iallreduce(layers_[i]->blobs()[j]->mutable_cpu_diff(),
-                layers_[i]->blobs()[j]->count());
-      }
-#endif
     }
+#ifdef USE_MPI
+    for(int j =0;j<layers_[i]->blobs().size();j++){
+      layers_[i]->blobs()[j]->mutable_cpu_diff();
+      caffe_iallreduce(layers_[i]->blobs()[j]->mutable_cpu_diff(),
+              layers_[i]->blobs()[j]->count());
+    }
+#endif
+  //LOG(INFO)<<"layer id "<<i;
   }
 }
 
@@ -926,6 +928,38 @@ void Net<Dtype>::Update() {
     learnable_params_[i]->Update();
   }
 }
+
+template <typename Dtype>
+void Net<Dtype>::ShareBlobsWith(const Net* other) {
+  int num_source_blobs = other->blobs().size();
+  for (int i = 0; i < num_source_blobs; ++i) {
+    const string& source_blob_name = other->blob_names()[i];
+    if (
+      std::find(
+        other->input_blob_indices().begin(),
+        other->input_blob_indices().end(), i) !=
+      other->input_blob_indices().end()) {
+      LOG(INFO) << "Ignoring source blob " << source_blob_name;
+      continue;
+    }
+    int target_blob_id = 0;
+    while (target_blob_id != blob_names_.size() &&
+      blob_names_[target_blob_id] != source_blob_name) {
+      ++target_blob_id;
+    }
+    if (target_blob_id == blob_names_.size() ||
+      std::find(
+        net_input_blob_indices_.begin(),
+        net_input_blob_indices_.end(), target_blob_id) !=
+      net_input_blob_indices_.end()) {
+      LOG(INFO) << "Ignoring source blob " << source_blob_name;
+      continue;
+    }
+    LOG(INFO) << "Sharing source blob " << source_blob_name;
+    blobs_[target_blob_id]->ShareData((*other->blobs()[i]));
+  }
+}
+
 
 template <typename Dtype>
 void Net<Dtype>::ClearParamDiffs() {

@@ -53,13 +53,20 @@ void ImageDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
   LOG(INFO) << "A total of " << lines_.size() << " images.";
 
   lines_id_ = 0;
+#ifdef USE_MPI
+  //for multi GPU test,all gpu get one part of val dataset
+  int rank,size=0;
+  MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+  MPI_Comm_size(MPI_COMM_WORLD,&size);
+  lines_id_ = (lines_.size()/size)*rank;
+#endif
   // Check if we would need to randomly skip a few data points
   if (this->layer_param_.image_data_param().rand_skip()) {
     unsigned int skip = caffe_rng_rand() %
         this->layer_param_.image_data_param().rand_skip();
     LOG(INFO) << "Skipping first " << skip << " data points.";
     CHECK_GT(lines_.size(), skip) << "Not enough points to skip";
-    lines_id_ = skip;
+    lines_id_ += skip;
   }
   // Read an image, and use it to initialize the top blob.
   cv::Mat cv_img = ReadImageToCVMat(root_folder + lines_[lines_id_].first,
@@ -116,10 +123,15 @@ void ImageDataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
   // on single input batches allows for inputs of varying dimension.
   cv::Mat cv_img = ReadImageToCVMat(root_folder + lines_[lines_id_].first,
       new_height, new_width, is_color);
+  while(!cv_img.data){
+      cv_img = ReadImageToCVMat(root_folder + lines_[++lines_id_].first,
+        new_height, new_width, is_color); 
+  }
   CHECK(cv_img.data) << "Could not load " << lines_[lines_id_].first;
   // Use data_transformer to infer the expected blob shape from a cv_img.
   vector<int> top_shape = this->data_transformer_->InferBlobShape(cv_img);
   this->transformed_data_.Reshape(top_shape);
+  
   // Reshape batch according to the batch_size.
   top_shape[0] = batch_size;
   batch->data_.Reshape(top_shape);
@@ -135,7 +147,20 @@ void ImageDataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
     CHECK_GT(lines_size, lines_id_);
     cv::Mat cv_img = ReadImageToCVMat(root_folder + lines_[lines_id_].first,
         new_height, new_width, is_color);
-    CHECK(cv_img.data) << "Could not load " << lines_[lines_id_].first;
+    if(!cv_img.data){
+      LOG(INFO) << "Skip current image "<<lines_[lines_id_].first;
+      item_id--;
+      lines_id_++;
+      if (lines_id_ >= lines_size) {
+        // We have reached the end. Restart from the first
+         lines_id_ = 0;
+        if (this->layer_param_.image_data_param().shuffle()) {
+          ShuffleImages();
+        }
+        continue;
+      }
+    }
+    //CHECK(cv_img.data) << "Could not load " << lines_[lines_id_].first;
     read_time += timer.MicroSeconds();
     timer.Start();
     // Apply transformations (mirror, crop...) to the image

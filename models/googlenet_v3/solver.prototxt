@@ -1,0 +1,15 @@
+net: "models/googlenet_v3/train_val.prototxt"
+test_initialization: false
+test_iter: 391
+test_interval: 2000
+base_lr: 0.3
+iter_size: 2
+lr_policy: "fixed"
+display: 20
+max_iter: 1000000
+momentum: 0.9
+weight_decay: 0.0002
+snapshot: 2000
+snapshot_prefix: "/data1/lixiangqiao/models/googlenet_v3/googlenet_v3"
+solver_mode: GPU
+#backup: 0

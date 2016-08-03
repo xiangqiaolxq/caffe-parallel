@@ -111,6 +111,8 @@ class Solver {
 #ifdef USE_MPI
   void SyncGradient();
   void SyncData();
+  Dtype SyncLoss(Dtype loss);
+  void SyncOutput(shared_ptr<Net<Dtype> > net);
 #endif
 
   SolverParameter param_;

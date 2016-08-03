@@ -98,7 +98,8 @@ class Net {
    * called manually.
    */
   void ShareWeights();
-
+  
+  void ShareBlobsWith(const Net* other);
   /**
    * @brief For an already initialized net, implicitly copies (i.e., using no
    *        additional memory) the pre-trained layers from another Net.
