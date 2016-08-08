@@ -113,6 +113,7 @@ class Solver {
   void SyncData();
   Dtype SyncLoss(Dtype loss);
   void SyncOutput(shared_ptr<Net<Dtype> > net);
+  void SyncTest(vector<Dtype> test_score);
 #endif
 
   SolverParameter param_;

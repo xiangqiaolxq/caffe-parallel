@@ -105,6 +105,7 @@ void Solver<Dtype>::InitTrainNet() {
   net_state.MergeFrom(net_param.state());
   net_state.MergeFrom(param_.train_state());
   net_param.mutable_state()->CopyFrom(net_state);
+  Caffe::set_iter_size(param_.iter_size());
   if (Caffe::root_solver()) {
     net_.reset(new Net<Dtype>(net_param));
   } else {
@@ -196,6 +197,15 @@ void Solver<Dtype>::InitTestNets() {
 }
 
 #ifdef USE_MPI
+template <typename Dtype>
+void Solver<Dtype>::SyncTest(vector<Dtype>  test_score){
+  for (int j = 0; j < test_score.size(); ++j) {
+    caffe_iallreduce<Dtype>(&test_score[j],1);
+  }
+  mpi_force_synchronize();
+  caffe_scal(test_score.size(),(Dtype)1./Dtype(Caffe::MPI_all_rank()),&test_score[0]);
+}
+
 template <typename Dtype>
 void Solver<Dtype>::SyncOutput(shared_ptr<Net<Dtype> > net){
   const vector<Blob<Dtype>*>& result = net->output_blobs();
@@ -472,10 +482,6 @@ void Solver<Dtype>::Test(const int test_net_id) {
     if (param_.test_compute_loss()) {
       loss += iter_loss;
     }
-#ifdef USE_MPI
-  SyncOutput(test_net);
-  loss = SyncLoss(loss);
-#endif
     if (i == 0) {
       for (int j = 0; j < result.size(); ++j) {
         const Dtype* result_vec = result[j]->cpu_data();
@@ -494,6 +500,10 @@ void Solver<Dtype>::Test(const int test_net_id) {
       }
     }
   }
+#ifdef USE_MPI
+  SyncTest(test_score);
+  loss = SyncLoss(loss);
+#endif
   if (requested_early_exit_) {
     LOG(INFO)     << "Test interrupted.";
     return;

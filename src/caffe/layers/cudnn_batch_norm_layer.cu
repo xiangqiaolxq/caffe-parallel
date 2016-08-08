@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <vector>
+//#include <math>
 
 #include "thrust/device_vector.h"
 
@@ -22,6 +23,11 @@ void CuDNNBatchNormLayer<Dtype>::Forward_gpu(
   Dtype* save_inv_var = save_inv_var_.mutable_gpu_data();
   double epsilon = max(this->eps_, CUDNN_BN_MIN_EPSILON);
   if (this->phase_ == TRAIN) {
+    int iter_size = Caffe::iter_size();
+    Dtype fraction = 1 - this->moving_average_fraction_;
+    if(iter_size > 1)
+      for(int i = 1;i<iter_size;i++)
+        fraction = sqrt(fraction);
     // Call Batch normalization forward
     CUDNN_CHECK(cudnnBatchNormalizationForwardTraining(
       this->handle_, mode_,
@@ -29,7 +35,8 @@ void CuDNNBatchNormLayer<Dtype>::Forward_gpu(
       bottom_desc_, bottom_data,
       bottom_desc_, top_data,
       scale_bias_mean_var_desc_, scale_data, bias_data,
-      1 - this->moving_average_fraction_,
+      //1 - this->moving_average_fraction_,
+      fraction,
       this->blobs_[2]->mutable_gpu_data(),  // mean
       this->blobs_[3]->mutable_gpu_data(),  // variance
       epsilon, save_mean, save_inv_var));

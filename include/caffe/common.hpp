@@ -169,6 +169,8 @@ class Caffe {
   inline static bool root_solver() { return Get().root_solver_; }
   inline static void set_root_solver(bool val) { Get().root_solver_ = val; }
   inline static int device_id() { return Get().device_id_; }
+  inline static void set_iter_size(int iter_size) { Get().iter_size_ = iter_size; }
+  inline static int iter_size() { return Get().iter_size_; }
 #ifdef USE_MPI
   inline static int MPI_my_rank(){return Get().mpi_my_rank_;}
   inline static int MPI_all_rank(){return Get().mpi_all_rank_;}
@@ -190,6 +192,7 @@ class Caffe {
   bool root_solver_;
 
   int device_id_;
+  int iter_size_;
 #ifdef USE_MPI
   int mpi_my_rank_;
   int mpi_all_rank_;
