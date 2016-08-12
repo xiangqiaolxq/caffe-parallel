@@ -193,6 +193,7 @@ class Caffe {
 
   int device_id_;
   int iter_size_;
+  static shared_ptr<Caffe> singleton_;
 #ifdef USE_MPI
   int mpi_my_rank_;
   int mpi_all_rank_;

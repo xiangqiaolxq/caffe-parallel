@@ -199,11 +199,16 @@ void Solver<Dtype>::InitTestNets() {
 #ifdef USE_MPI
 template <typename Dtype>
 void Solver<Dtype>::SyncTest(vector<Dtype>  test_score){
+  Dtype *tmp =new Dtype[test_score.size()];
   for (int j = 0; j < test_score.size(); ++j) {
-    caffe_iallreduce<Dtype>(&test_score[j],1);
+    caffe_iallreduce<Dtype>(&test_score[j],&tmp[j],1);
+    //LOG(INFO)<<"sync score "<<j;
   }
   mpi_force_synchronize();
-  caffe_scal(test_score.size(),(Dtype)1./Dtype(Caffe::MPI_all_rank()),&test_score[0]);
+  for(int i=0;i<test_score.size();i++){
+    test_score[i]=tmp[i]/Dtype(Caffe::MPI_all_rank());
+  }
+  //caffe_scal(test_score.size(),(Dtype)1./Dtype(Caffe::MPI_all_rank()),&test_score[0]);
 }
 
 template <typename Dtype>
@@ -482,6 +487,11 @@ void Solver<Dtype>::Test(const int test_net_id) {
     if (param_.test_compute_loss()) {
       loss += iter_loss;
     }
+#ifdef USE_MPI
+  //loss = SyncLoss(loss);
+    MPIComm::SetReady(true);
+    SyncOutput(test_nets_[test_net_id]);
+#endif
     if (i == 0) {
       for (int j = 0; j < result.size(); ++j) {
         const Dtype* result_vec = result[j]->cpu_data();
@@ -500,10 +510,6 @@ void Solver<Dtype>::Test(const int test_net_id) {
       }
     }
   }
-#ifdef USE_MPI
-  SyncTest(test_score);
-  loss = SyncLoss(loss);
-#endif
   if (requested_early_exit_) {
     LOG(INFO)     << "Test interrupted.";
     return;
